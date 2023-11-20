@@ -21,7 +21,7 @@ import (
 func main() {
 	app := &cli.App{
 		Name:  "pubsub-forwarder",
-		Usage: "pubsub-forwarder seamlessly bridges and transforms messages between multiple pubsub systems, facilitating effortless communication and integration.",
+		Usage: "pubsub-forwarder effortlessly connects and transforms messages between different pubsub systems, acting as a seamless intermediary.",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:    "path",

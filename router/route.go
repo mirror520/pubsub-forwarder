@@ -1,6 +1,8 @@
 package router
 
 import (
+	"errors"
+
 	"go.uber.org/zap"
 
 	"github.com/mirror520/pubsub-forwarder/model"
@@ -13,19 +15,33 @@ type Route struct {
 	profile   model.Route
 	connector pubsub.PubSub
 	endpoints []pubsub.PubSub
-	binded    bool
+
+	subscribed map[string]struct{}
+	binded     bool
 }
 
 func (r *Route) Bind() error {
+	var err error
 	for _, topic := range r.profile.Topics {
-		err := r.connector.Subscribe(topic, r.Handler)
-		if err != nil {
-			return err
+		_, ok := r.subscribed[topic]
+		if ok {
+			continue
 		}
+
+		e := r.connector.Subscribe(topic, r.Handler)
+		if e != nil {
+			err = errors.Join(err, e)
+			continue
+		}
+
+		r.subscribed[topic] = struct{}{}
 	}
 
-	r.binded = true
-	return nil
+	if err == nil {
+		r.binded = true
+	}
+
+	return err
 }
 
 func (r *Route) Handler(topic string, payload []byte) {
@@ -46,4 +62,8 @@ func (r *Route) Handler(topic string, payload []byte) {
 
 		log.Info("message published")
 	}
+}
+
+func (r *Route) Binded() bool {
+	return r.binded
 }

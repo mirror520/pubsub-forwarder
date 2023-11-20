@@ -1,9 +1,9 @@
 package pubsub
 
 import (
-	"errors"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -31,10 +31,19 @@ type mqttPubSub struct {
 	cfg              model.Transport
 	client           mqtt.Client
 	subscribedTopics []*SubscribedTopic
+	sync.RWMutex
 }
 
 func (ps *mqttPubSub) Name() string {
 	return ps.cfg.Name
+}
+
+func (ps *mqttPubSub) Connected() bool {
+	if ps.client != nil && ps.client.IsConnected() {
+		return true
+	}
+
+	return false
 }
 
 func (ps *mqttPubSub) Connect() error {
@@ -93,7 +102,10 @@ func (ps *mqttPubSub) Subscribe(topic string, callback MessageHandler) error {
 	topic = strings.ReplaceAll(topic, `*`, `+`)
 
 	token := client.Subscribe(topic, QoS, func(client mqtt.Client, msg mqtt.Message) {
-		callback(msg.Topic(), msg.Payload())
+		msgTopic := msg.Topic()
+		msgTopic = strings.ReplaceAll(msgTopic, `/`, `.`)
+
+		callback(msgTopic, msg.Payload())
 	})
 
 	token.Wait()
@@ -106,17 +118,19 @@ func (ps *mqttPubSub) Subscribe(topic string, callback MessageHandler) error {
 		Callback: callback,
 	}
 
+	ps.Lock()
 	ps.subscribedTopics = append(ps.subscribedTopics, subscribedTopic)
+	ps.Unlock()
 	return nil
 }
 
 func (ps *mqttPubSub) Client() (mqtt.Client, error) {
 	if ps.client == nil {
-		return nil, errors.New("invalid client")
+		return nil, ErrInvalidClient
 	}
 
 	if !ps.client.IsConnectionOpen() {
-		return nil, errors.New("client disconnected")
+		return nil, ErrClientDisconnected
 	}
 
 	return ps.client, nil
@@ -129,13 +143,17 @@ func (ps *mqttPubSub) ConnectHandler() mqtt.OnConnectHandler {
 		)
 		log.Info("client connected")
 
+		ps.RLock()
 		for _, sub := range ps.subscribedTopics {
 			log := log.With(
 				zap.String("topic", sub.Topic),
 			)
 
 			token := client.Subscribe(sub.Topic, QoS, func(client mqtt.Client, msg mqtt.Message) {
-				sub.Callback(msg.Topic(), msg.Payload())
+				msgTopic := msg.Topic()
+				msgTopic = strings.ReplaceAll(msgTopic, `/`, `.`)
+
+				sub.Callback(msgTopic, msg.Payload())
 			})
 
 			token.Wait()
@@ -146,6 +164,7 @@ func (ps *mqttPubSub) ConnectHandler() mqtt.OnConnectHandler {
 
 			log.Info("topic re-subscribed successfully")
 		}
+		ps.RUnlock()
 	}
 }
 

@@ -1,0 +1,59 @@
+transports:
+- name: local
+  protocol: mqtt
+  broker:
+    address: tcp://localhost:1883
+    # username: username
+    # password: password
+- name: mqtt
+  protocol: mqtt
+  broker:
+    address: tcp://mqtt.example:1883
+- name: nats
+  protocol: nats
+  broker:
+    address: nats://nats.example:4222
+    opts:
+      pull: true
+      jetstream:
+        events:
+          stream:
+            name: EVENTS
+            config: |
+              {
+                "description": "events",
+                "subjects": [
+                  "events.>"
+                ]
+              }
+          consumer:
+            name: instance-0
+            stream: EVENTS
+            config: |
+              {
+                "ack_policy": "explicit"
+              }
+
+            # 藉由調整 Consumer 設定值，原先無 Consumer 時將會重新建立
+            # 若其他 Consumers 已經存在，故不會影響其現有設定
+            # config: |
+            #   {
+            #     "ack_policy": "explicit",
+            #     "deliver_policy": "by_start_time",
+            #     "opt_start_time": "2023-09-20T16:51:00.000+08:00"
+            #   }
+
+routes:
+  local_to_mqtt:
+    connector: local
+    topics:
+    - "hello.world"
+    endpoints:
+    - transport: mqtt
+      # rewrite:
+  nats_to_local:
+    connector: nats
+    topics:
+    - "events::#"
+    endpoints:
+    - transport: local

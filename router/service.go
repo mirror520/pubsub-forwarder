@@ -78,11 +78,12 @@ func NewService(cfg *model.Config) Service {
 		}
 
 		route := &Route{
-			id:        id,
-			log:       log,
-			profile:   profile,
-			connector: connector,
-			endpoints: endpoints,
+			id:         id,
+			log:        log,
+			profile:    profile,
+			connector:  connector,
+			endpoints:  endpoints,
+			subscribed: make(map[string]struct{}),
 		}
 
 		routesMap[profile.Connector] = append(routes, route)
@@ -111,6 +112,10 @@ func (svc *service) CheckConnAndRoutes(ctx context.Context, duration time.Durati
 
 		case <-ticker.C:
 			for name, ps := range svc.pubSubs {
+				if ps.Connected() {
+					continue
+				}
+
 				log := log.With(
 					zap.String("phase", "check_conn"),
 					zap.String("pubsub", name),
@@ -127,7 +132,7 @@ func (svc *service) CheckConnAndRoutes(ctx context.Context, duration time.Durati
 
 			for _, routes := range svc.routesMap {
 				for _, route := range routes {
-					if route.binded {
+					if route.Binded() {
 						continue
 					}
 

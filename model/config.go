@@ -1,5 +1,7 @@
 package model
 
+import "gopkg.in/yaml.v3"
+
 type Config struct {
 	Transports []Transport
 	Routes     map[string]Route
@@ -23,6 +25,7 @@ type Broker struct {
 	Address  string
 	Username string
 	Password string
+	Options  yaml.Node `yaml:"opts"`
 }
 
 type Route struct {
