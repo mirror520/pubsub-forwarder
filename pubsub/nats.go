@@ -9,13 +9,14 @@ import (
 	"sync"
 
 	"github.com/nats-io/nats.go"
+	"github.com/oklog/ulid/v2"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
 
 	"github.com/mirror520/pubsub-forwarder/model"
 )
 
-func NewNATSPubSub(cfg model.Transport) (PubSub, error) {
+func NewNATSPubSub(cfg *model.Transport) (PubSub, error) {
 	var opts *NATSOptions
 	err := cfg.Broker.Options.Decode(&opts)
 	if err != nil {
@@ -31,7 +32,7 @@ func NewNATSPubSub(cfg model.Transport) (PubSub, error) {
 		cfg:              cfg,
 		opts:             opts,
 		events:           make(map[string]*Event),
-		subscribedTopics: make([]*subscribedTopicForNATS, 0),
+		subscribedTopics: make([]*subscribedTopic, 0),
 		ctx:              ctx,
 		cancel:           cancel,
 	}, nil
@@ -39,12 +40,12 @@ func NewNATSPubSub(cfg model.Transport) (PubSub, error) {
 
 type natsPubSub struct {
 	log              *zap.Logger
-	cfg              model.Transport
+	cfg              *model.Transport
 	opts             *NATSOptions
 	nc               *nats.Conn
 	js               nats.JetStreamContext
 	events           map[string]*Event
-	subscribedTopics []*subscribedTopicForNATS
+	subscribedTopics []*subscribedTopic
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -53,6 +54,10 @@ type natsPubSub struct {
 
 func (ps *natsPubSub) Name() string {
 	return ps.cfg.Name
+}
+
+func (ps *natsPubSub) Handle(topic string, payload json.RawMessage, ids ...ulid.ULID) error {
+	return ps.Publish(topic, payload, ids...)
 }
 
 func (ps *natsPubSub) Connected() bool {
@@ -64,7 +69,7 @@ func (ps *natsPubSub) Connected() bool {
 }
 
 func (ps *natsPubSub) Connect() error {
-	if ps.nc != nil && !ps.nc.IsClosed() {
+	if ps.Connected() {
 		return nil
 	}
 
@@ -116,13 +121,24 @@ func (ps *natsPubSub) Close() error {
 	return client.Drain()
 }
 
-func (ps *natsPubSub) Publish(topic string, payload []byte) error {
+func (ps *natsPubSub) Publish(topic string, payload json.RawMessage, ids ...ulid.ULID) error {
 	client, err := ps.Client()
 	if err != nil {
 		return err
 	}
 
-	return client.Publish(topic, payload)
+	var id ulid.ULID
+	if len(ids) > 0 {
+		id = ids[0]
+	} else {
+		id = ulid.Make()
+	}
+
+	msg := nats.NewMsg(topic)
+	msg.Header.Add("id", id.String())
+	msg.Data = payload
+
+	return client.PublishMsg(msg)
 }
 
 var re = regexp.MustCompile(`^(?P<name>\w+)::(?P<topic>.+)`)
@@ -156,19 +172,23 @@ func (ps *natsPubSub) Subscribe(topic string, callback MessageHandler) error {
 	topic = strings.ReplaceAll(topic, `#`, `>`)
 
 	sub, err := client.Subscribe(topic, func(msg *nats.Msg) {
-		callback(msg.Subject, msg.Data)
+		idStr := msg.Header.Get("id")
+		id, err := ulid.Parse(idStr)
+		if err != nil {
+			id = ulid.Make()
+		}
+
+		callback(msg.Subject, msg.Data, id)
 	})
 
 	if err != nil {
 		return err
 	}
 
-	subscribedTopic := &subscribedTopicForNATS{
-		sub: sub,
-		SubscribedTopic: SubscribedTopic{
-			Topic:    topic,
-			Callback: callback,
-		},
+	subscribedTopic := &subscribedTopic{
+		sub:      sub,
+		topic:    topic,
+		callback: callback,
 	}
 
 	ps.Lock()
@@ -176,6 +196,57 @@ func (ps *natsPubSub) Subscribe(topic string, callback MessageHandler) error {
 	ps.Unlock()
 
 	return nil
+}
+
+func (ps *natsPubSub) Unsubscribe(topic ...string) error {
+	if len(topic) == 0 {
+		return errors.New("empty topic")
+	}
+
+	ps.Lock()
+	defer ps.Unlock()
+
+	remainingTopics := make(map[string]struct{})
+	for _, subscribedTopic := range ps.subscribedTopics {
+		remainingTopics[subscribedTopic.topic] = struct{}{}
+	}
+
+	var errs error
+	for _, t := range topic {
+		t = strings.ReplaceAll(t, `#`, `>`)
+
+		delete(remainingTopics, t)
+
+		for _, subscribedTopic := range ps.subscribedTopics {
+			if subscribedTopic.topic != t {
+				continue
+			}
+
+			if subscribedTopic.cancel != nil {
+				subscribedTopic.cancel()
+				subscribedTopic.cancel = nil
+			}
+
+			err := subscribedTopic.sub.Unsubscribe()
+			if err != nil {
+				errs = errors.Join(errs, err)
+			}
+		}
+	}
+
+	subscribedTopics := make([]*subscribedTopic, 0)
+	for _, subscribedTopic := range ps.subscribedTopics {
+		_, ok := remainingTopics[subscribedTopic.topic]
+		if !ok {
+			continue
+		}
+
+		subscribedTopics = append(subscribedTopics, subscribedTopic)
+	}
+
+	ps.subscribedTopics = subscribedTopics
+
+	return errs
 }
 
 func (ps *natsPubSub) Client() (*nats.Conn, error) {
@@ -247,44 +318,46 @@ func (ps *natsPubSub) PullSubscribe(consumer string, stream string, callback Mes
 		return err
 	}
 
-	subscribedTopic := &subscribedTopicForNATS{
+	ctx, cancel := context.WithCancel(ps.ctx)
+
+	subscribedTopic := &subscribedTopic{
 		log: ps.log.With(
 			zap.String("consumer", consumer),
 			zap.String("stream", stream),
 		),
-		sub: sub,
-		SubscribedTopic: SubscribedTopic{
-			Topic:    stream + "_" + consumer,
-			Callback: callback,
-		},
+		sub:      sub,
+		topic:    stream + "_" + consumer,
+		callback: callback,
+		cancel:   cancel,
 	}
+
+	go subscribedTopic.pull(ctx)
 
 	ps.Lock()
 	ps.subscribedTopics = append(ps.subscribedTopics, subscribedTopic)
 	ps.Unlock()
 
-	go subscribedTopic.pull(ps.ctx)
-
 	return nil
 }
 
-type subscribedTopicForNATS struct {
-	log *zap.Logger
-	sub *nats.Subscription
-	SubscribedTopic
+type subscribedTopic struct {
+	log      *zap.Logger
+	sub      *nats.Subscription
+	topic    string
+	callback MessageHandler
+	cancel   context.CancelFunc
 }
 
-func (subscribedTopic *subscribedTopicForNATS) pull(ctx context.Context) {
+func (subscribedTopic *subscribedTopic) pull(ctx context.Context) {
 	var (
 		log      = subscribedTopic.log.With(zap.String("action", "pull_subscribe"))
 		sub      = subscribedTopic.sub
-		callback = subscribedTopic.Callback
+		callback = subscribedTopic.callback
 	)
 
 	for {
 		select {
 		case <-ctx.Done():
-			sub.Unsubscribe()
 			log.Info("done")
 			return
 
@@ -296,7 +369,13 @@ func (subscribedTopic *subscribedTopicForNATS) pull(ctx context.Context) {
 			}
 
 			for _, msg := range msgs {
-				callback(msg.Subject, msg.Data)
+				idStr := msg.Header.Get("id")
+				id, err := ulid.Parse(idStr)
+				if err != nil {
+					id = ulid.Make()
+				}
+
+				callback(msg.Subject, msg.Data, id)
 
 				msg.Ack()
 			}

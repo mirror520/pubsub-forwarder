@@ -1,11 +1,14 @@
 package pubsub
 
 import (
+	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/oklog/ulid/v2"
 	"go.uber.org/zap"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -15,27 +18,31 @@ import (
 
 const QoS byte = 1
 
-func NewMQTTPubSub(cfg model.Transport) (PubSub, error) {
+func NewMQTTPubSub(cfg *model.Transport) (PubSub, error) {
 	return &mqttPubSub{
 		log: zap.L().With(
 			zap.String("pubsub", "mqtt"),
 			zap.String("name", cfg.Name),
 		),
 		cfg:              cfg,
-		subscribedTopics: make([]*SubscribedTopic, 0),
+		subscribedTopics: make(map[string]MessageHandler),
 	}, nil
 }
 
 type mqttPubSub struct {
 	log              *zap.Logger
-	cfg              model.Transport
+	cfg              *model.Transport
 	client           mqtt.Client
-	subscribedTopics []*SubscribedTopic
+	subscribedTopics map[string]MessageHandler // map[Topic]MessageHandler
 	sync.RWMutex
 }
 
 func (ps *mqttPubSub) Name() string {
 	return ps.cfg.Name
+}
+
+func (ps *mqttPubSub) Handle(topic string, payload json.RawMessage, ids ...ulid.ULID) error {
+	return ps.Publish(topic, payload, ids...)
 }
 
 func (ps *mqttPubSub) Connected() bool {
@@ -47,7 +54,7 @@ func (ps *mqttPubSub) Connected() bool {
 }
 
 func (ps *mqttPubSub) Connect() error {
-	if ps.client != nil && ps.client.IsConnected() {
+	if ps.Connected() {
 		return nil
 	}
 
@@ -78,7 +85,7 @@ func (ps *mqttPubSub) Close() error {
 	return nil
 }
 
-func (ps *mqttPubSub) Publish(topic string, payload []byte) error {
+func (ps *mqttPubSub) Publish(topic string, payload json.RawMessage, ids ...ulid.ULID) error {
 	client, err := ps.Client()
 	if err != nil {
 		return err
@@ -98,6 +105,14 @@ func (ps *mqttPubSub) Subscribe(topic string, callback MessageHandler) error {
 		return err
 	}
 
+	ps.Lock()
+	defer ps.Unlock()
+
+	_, ok := ps.subscribedTopics[topic]
+	if ok {
+		return errors.New("topic is already subscribed")
+	}
+
 	topic = strings.ReplaceAll(topic, `.`, `/`)
 	topic = strings.ReplaceAll(topic, `*`, `+`)
 
@@ -105,7 +120,7 @@ func (ps *mqttPubSub) Subscribe(topic string, callback MessageHandler) error {
 		msgTopic := msg.Topic()
 		msgTopic = strings.ReplaceAll(msgTopic, `/`, `.`)
 
-		callback(msgTopic, msg.Payload())
+		callback(msgTopic, msg.Payload(), ulid.Make())
 	})
 
 	token.Wait()
@@ -113,15 +128,37 @@ func (ps *mqttPubSub) Subscribe(topic string, callback MessageHandler) error {
 		return err
 	}
 
-	subscribedTopic := &SubscribedTopic{
-		Topic:    topic,
-		Callback: callback,
+	ps.subscribedTopics[topic] = callback
+
+	return nil
+}
+
+func (ps *mqttPubSub) Unsubscribe(topic ...string) error {
+	if len(topic) == 0 {
+		return errors.New("empty topic")
 	}
 
+	client, err := ps.Client()
+	if err != nil {
+		return err
+	}
+
+	topics := make([]string, len(topic))
+
 	ps.Lock()
-	ps.subscribedTopics = append(ps.subscribedTopics, subscribedTopic)
+	for i, t := range topic {
+		delete(ps.subscribedTopics, t)
+
+		t = strings.ReplaceAll(t, `.`, `/`)
+		t = strings.ReplaceAll(t, `*`, `+`)
+		topics[i] = t
+	}
 	ps.Unlock()
-	return nil
+
+	token := client.Unsubscribe(topics...)
+
+	token.Wait()
+	return token.Error()
 }
 
 func (ps *mqttPubSub) Client() (mqtt.Client, error) {
@@ -144,16 +181,16 @@ func (ps *mqttPubSub) ConnectHandler() mqtt.OnConnectHandler {
 		log.Info("client connected")
 
 		ps.RLock()
-		for _, sub := range ps.subscribedTopics {
+		for topic, callback := range ps.subscribedTopics {
 			log := log.With(
-				zap.String("topic", sub.Topic),
+				zap.String("topic", topic),
 			)
 
-			token := client.Subscribe(sub.Topic, QoS, func(client mqtt.Client, msg mqtt.Message) {
+			token := client.Subscribe(topic, QoS, func(client mqtt.Client, msg mqtt.Message) {
 				msgTopic := msg.Topic()
 				msgTopic = strings.ReplaceAll(msgTopic, `/`, `.`)
 
-				sub.Callback(msgTopic, msg.Payload())
+				callback(msgTopic, msg.Payload(), ulid.Make())
 			})
 
 			token.Wait()

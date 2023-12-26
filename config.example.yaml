@@ -34,14 +34,12 @@ transports:
                 "ack_policy": "explicit"
               }
 
-            # 藉由調整 Consumer 設定值，原先無 Consumer 時將會重新建立
-            # 若其他 Consumers 已經存在，故不會影響其現有設定
-            # config: |
-            #   {
-            #     "ack_policy": "explicit",
-            #     "deliver_policy": "by_start_time",
-            #     "opt_start_time": "2023-09-20T16:51:00.000+08:00"
-            #   }
+persistences:
+- name: events
+  driver: badger
+  # dsn: $FORWARDER_PATH/events
+
+# TODO: middlewares
 
 routes:
   local_to_mqtt:
@@ -49,11 +47,10 @@ routes:
     topics:
     - "hello.world"
     endpoints:
-    - transport: mqtt
-      # rewrite:
+    - mqtt
+    - events
   nats_to_local:
     connector: nats
     topics:
     - "events::#"
-    endpoints:
-    - transport: local
+    endpoints: [ local ]

@@ -1,8 +1,12 @@
 package pubsub
 
 import (
+	"encoding/json"
 	"errors"
 
+	"github.com/oklog/ulid/v2"
+
+	"github.com/mirror520/pubsub-forwarder/interfaces"
 	"github.com/mirror520/pubsub-forwarder/model"
 )
 
@@ -17,15 +21,17 @@ var (
 // # (hash) can substitute for zero or more words.
 
 type PubSub interface {
-	Name() string
+	interfaces.Endpoint
+
 	Connected() bool
 	Connect() error
 	Close() error
-	Publish(topic string, payload []byte) error
+	Publish(topic string, payload json.RawMessage, ids ...ulid.ULID) error
 	Subscribe(topic string, callback MessageHandler) error
+	Unsubscribe(topic ...string) error
 }
 
-func NewPubSub(cfg model.Transport) (PubSub, error) {
+func NewPubSub(cfg *model.Transport) (PubSub, error) {
 	switch cfg.Protocol {
 	case model.MQTT:
 		return NewMQTTPubSub(cfg)
@@ -38,9 +44,7 @@ func NewPubSub(cfg model.Transport) (PubSub, error) {
 	}
 }
 
-type MessageHandler func(topic string, payload []byte)
-
-type SubscribedTopic struct {
-	Topic    string
-	Callback MessageHandler
-}
+type (
+	MessageHandler    func(topic string, payload json.RawMessage, id ulid.ULID)
+	MessageMiddleware func(next MessageHandler) MessageHandler
+)

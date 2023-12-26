@@ -5,9 +5,11 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/urfave/cli/v2"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -15,7 +17,9 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/mirror520/pubsub-forwarder/model"
-	"github.com/mirror520/pubsub-forwarder/router"
+	"github.com/mirror520/pubsub-forwarder/transport/http"
+
+	router "github.com/mirror520/pubsub-forwarder"
 )
 
 func main() {
@@ -27,6 +31,12 @@ func main() {
 				Name:    "path",
 				Usage:   "Specifies the working directory",
 				EnvVars: []string{"FORWARDER_PATH"},
+			},
+			&cli.IntFlag{
+				Name:    "port",
+				Usage:   "Specifies the HTTP service port",
+				Value:   8080,
+				EnvVars: []string{"FORWARDER_PORT"},
 			},
 		},
 		Action: run,
@@ -89,8 +99,28 @@ func run(cli *cli.Context) error {
 		log.Fatal(err.Error())
 	}
 
+	cfg.SetPath(path)
+
 	svc := router.NewService(cfg)
+	svc = router.LoggingMiddleware(log)(svc)
 	defer svc.Close()
+
+	r := gin.Default()
+	apiV1 := r.Group("/v1")
+
+	// POST /routers/:from/replay/:to
+	{
+		endpoint := router.ReplayEndpoint(svc)
+		apiV1.POST("/routers/:from/replay/:to", http.ReplayHandler(endpoint))
+	}
+
+	// DELETE /tasks/:id
+	{
+		endpoint := router.CloseTaskEndpoint(svc)
+		apiV1.DELETE("/tasks/:id", http.CloseTaskHandler(endpoint))
+	}
+
+	go r.Run(":" + strconv.Itoa(cli.Int("port")))
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
