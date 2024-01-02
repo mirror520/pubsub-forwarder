@@ -13,7 +13,6 @@ import (
 	"github.com/urfave/cli/v2"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
-	"gopkg.in/natefinch/lumberjack.v2"
 	"gopkg.in/yaml.v3"
 
 	"github.com/mirror520/pubsub-forwarder/model"
@@ -63,18 +62,8 @@ func run(cli *cli.Context) error {
 	encoderCfg := zap.NewDevelopmentEncoderConfig()
 	encoder := zapcore.NewConsoleEncoder(encoderCfg)
 
-	hook := &lumberjack.Logger{
-		Filename:   path + "/log/proxy.log",
-		MaxSize:    100,
-		MaxAge:     60,
-		MaxBackups: 0,
-		LocalTime:  true,
-		Compress:   false,
-	}
-
 	syncers := []zapcore.WriteSyncer{
 		zapcore.AddSync(os.Stdout),
-		zapcore.AddSync(hook),
 	}
 
 	core := zapcore.NewCore(
