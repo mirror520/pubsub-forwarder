@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 
 	"github.com/oklog/ulid/v2"
@@ -80,14 +81,18 @@ func (task *replayTask) replaying(ctx context.Context) {
 			log.Debug("event fetched", zap.Int("size", len(events)))
 
 			for _, e := range events {
-				// TODO: add event.ID
-
 				log := task.log.With(
 					zap.String("topic", e.Topic),
 				)
 
+				bs, err := json.Marshal(e.Payload)
+				if err != nil {
+					log.Error(err.Error())
+					continue
+				}
+
 				for _, endpoint := range task.endpoints {
-					err := endpoint.Handle(e.Topic, e.Payload)
+					err := endpoint.Handle(e.Topic, bs, e.ID)
 					if err != nil {
 						log.Error(err.Error(), zap.String("to", endpoint.Name()))
 					}

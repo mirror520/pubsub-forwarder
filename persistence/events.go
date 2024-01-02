@@ -89,7 +89,12 @@ func (s *eventsStorage) Store(topic string, payload json.RawMessage, ids ...ulid
 		return err
 	}
 
-	return svc.Store(topic, payload, ids...)
+	p, err := events.NewPayloadFromBytes(payload)
+	if err != nil {
+		return err
+	}
+
+	return svc.Store(topic, p, ids...)
 }
 
 func (s *eventsStorage) Iterator(topic string, since time.Time) (Iterator, error) {

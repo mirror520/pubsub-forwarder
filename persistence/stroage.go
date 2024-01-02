@@ -29,7 +29,7 @@ type Storage interface {
 
 func NewStorage(cfg *model.Persistence) (Storage, error) {
 	switch cfg.Driver {
-	case events.BadgerDB:
+	case events.InMem, events.BadgerDB, events.InfluxDB, events.MongoDB:
 		return NewEventsStorage(cfg)
 
 	default:
